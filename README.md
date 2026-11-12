@@ -131,8 +131,18 @@ of at most 200 characters, without spaces or empty entries. Missing resources
 are ignored during deletion. Duplicate IDs are returned once in request order;
 if no resources exist, the response is `{"ids":[]}`.
 
+Resource deletion calls Song Service's `DELETE /songs?id=...` through
+`SongApiClient` for the IDs of resources actually removed. Missing metadata is
+ignored by Song Service. If no resources exist, no metadata deletion is requested.
+Local deletions are flushed before the API call; a remote failure returns `500`
+and rolls back the local transaction. As with uploads, this is not a distributed
+transaction: a later local commit failure cannot restore deleted remote metadata.
+
 GET returns `404` when a resource does not exist. Invalid input returns `400`.
 Unexpected server errors return `500` without exposing internal details.
+
+Invalid resource path IDs use a simple error response without `details`, for
+example `{"errorMessage":"Invalid value 'ABC' for ID. Must be a positive integer","errorCode":"400"}`.
 
 Upload raw binary MP3 data, not multipart form data:
 
@@ -156,6 +166,12 @@ If Song Service rejects metadata or is unavailable, the upload returns `500`
 and the local resource insert is rolled back. This simple synchronous flow is
 not a distributed transaction: a later local commit/network failure cannot undo
 an already successful remote metadata insert.
+
+`SongApiClient` decodes downstream simple and validation errors into
+`SongApiException`, retaining the HTTP status, `errorMessage`, `errorCode`, and
+optional `details`. These details are logged by the global handler; downstream
+failures still return a generic `500` to Resource Service callers. Malformed
+downstream error responses are reported explicitly rather than treated as success.
 
 ### Song Service (port 8082)
 
@@ -235,8 +251,13 @@ can extend `NotFoundException`; service validation can throw
 of field errors. Annotated request DTO failures use the same validation response.
 Unexpected failures are logged and return a generic `500` message.
 
-Both services reuse `RequestIds.parse` and `RequestIds.parseCsv` for consistent
-positive integer and 200-character CSV validation. Business logic, persistence,
+Both services use shared Bean Validation annotations `@PositiveId` and `@IdCsv`
+for positive integer and 200-character CSV validation. Spring MVC validates
+controller parameters and `@Validated` protects service entry points.
+Path ID and CSV errors use the simple error response; request DTO constraint
+errors include field details. CSV errors identify the invalid token or report
+the actual string length. Missing metadata fields have required-field messages;
+empty text fields have length/format messages. Business logic, persistence,
 mappers, and successful response DTOs remain in each service.
 The starter has no database dependency.
 Build/install the reactor before running an individual consuming module.

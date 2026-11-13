@@ -2,13 +2,13 @@ services:
   kb-resource-db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: resource_db
-      POSTGRES_USER: ${RESOURCE_DB_USERNAME:-resource_db_username}
-      POSTGRES_PASSWORD: ${RESOURCE_DB_PASSWORD:-resource_db_password}
+      POSTGRES_DB: ${RESOURCE_DB_NAME:?Set RESOURCE_DB_NAME in .env}
+      POSTGRES_USER: ${RESOURCE_DB_USERNAME:?Set RESOURCE_DB_USERNAME in .env}
+      POSTGRES_PASSWORD: ${RESOURCE_DB_PASSWORD:?Set RESOURCE_DB_PASSWORD in .env}
     ports:
       - "${DB_PORT:-5433}:5432"
     volumes:
-      - resource-db-data:/var/lib/postgresql/data
+      - ./init-scripts/resource-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -18,19 +18,44 @@ services:
   kb-song-db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: song_db
-      POSTGRES_USER: ${SONG_DB_USERNAME:-song_db_username}
-      POSTGRES_PASSWORD: ${SONG_DB_PASSWORD:-song_db_password}
+      POSTGRES_DB: ${SONG_DB_NAME:?Set SONG_DB_NAME in .env}
+      POSTGRES_USER: ${SONG_DB_USERNAME:?Set SONG_DB_USERNAME in .env}
+      POSTGRES_PASSWORD: ${SONG_DB_PASSWORD:?Set SONG_DB_PASSWORD in .env}
     ports:
       - "${SONG_DB_PORT:-5434}:5432"
     volumes:
-      - song-db-data:/var/lib/postgresql/data
+      - ./init-scripts/song-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-volumes:
-  resource-db-data:
-  song-db-data:
+  resource-service:
+    build:
+      context: ./resource-service
+    environment:
+      RESOURCE_DB_URL: ${RESOURCE_DB_URL:?Set RESOURCE_DB_URL in .env}
+      RESOURCE_DB_USERNAME: ${RESOURCE_DB_USERNAME:?Set RESOURCE_DB_USERNAME in .env}
+      RESOURCE_DB_PASSWORD: ${RESOURCE_DB_PASSWORD:?Set RESOURCE_DB_PASSWORD in .env}
+      SONG_SERVICE_URL: ${SONG_SERVICE_URL:?Set SONG_SERVICE_URL in .env}
+    ports:
+      - "${RESOURCE_SERVICE_PORT:-8081}:8081"
+    depends_on:
+      kb-resource-db:
+        condition: service_healthy
+      song-service:
+        condition: service_started
+
+  song-service:
+    build:
+      context: ./song-service
+    environment:
+      SONG_DB_URL: ${SONG_DB_URL:?Set SONG_DB_URL in .env}
+      SONG_DB_USERNAME: ${SONG_DB_USERNAME:?Set SONG_DB_USERNAME in .env}
+      SONG_DB_PASSWORD: ${SONG_DB_PASSWORD:?Set SONG_DB_PASSWORD in .env}
+    ports:
+      - "${SONG_SERVICE_PORT:-8082}:8082"
+    depends_on:
+      kb-song-db:
+        condition: service_healthy

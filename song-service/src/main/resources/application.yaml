@@ -10,7 +10,7 @@ spring:
     password: ${SONG_DB_PASSWORD:song_db_password}
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: none
     open-in-view: false
   jackson:
     deserialization:

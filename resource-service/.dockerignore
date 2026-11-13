@@ -1,0 +1,11 @@
+.git
+.idea
+.vscode
+.settings
+target
+src/test
+*.iml
+.DS_Store
+.env
+.env.*
+!.env.example

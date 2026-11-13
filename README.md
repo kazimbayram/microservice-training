@@ -99,19 +99,55 @@ defaults to username `resource_db_username` and password `resource_db_password`;
 Song Service defaults to username `song_db_username` and password
 `song_db_password`. Override these training-only defaults with
 `RESOURCE_DB_USERNAME` / `RESOURCE_DB_PASSWORD` and
-`SONG_DB_USERNAME` / `SONG_DB_PASSWORD` in both Compose and the application.
-Set `RESOURCE_DB_URL` and `SONG_DB_URL` to the localhost URLs shown above when
-running on the host. For applications inside the Compose network, use
-`jdbc:postgresql://kb-resource-db:5432/resource_db` and
-`jdbc:postgresql://kb-song-db:5432/song_db` instead. `DB_PORT` and `SONG_DB_PORT`
-configure the published Docker host ports, not the container ports.
-Credentials used on the first container startup initialize the database;
-changing environment variables later does not change an existing database user.
+`SONG_DB_USERNAME` / `SONG_DB_PASSWORD` in `.env` and, for local applications,
+their process environment. With the supplied `.env`, no local overrides are
+needed. Spring does not load Compose's `.env`, so local runs use localhost
+defaults; do not export the container database URLs into your local shell.
+`DB_PORT` and `SONG_DB_PORT` configure published host ports, not container ports.
 
-Hibernate automatically creates and updates the schema with
-`spring.jpa.hibernate.ddl-auto=update`. No migration tools or SQL initialization
-scripts are used. Database data persists in the `resource-db-data` and
-`song-db-data` Docker volumes. Stop the containers with `docker compose down`.
+PostgreSQL creates each database using `POSTGRES_DB` and executes its mounted
+`init-scripts/*/init.sql` to create tables. Scripts do not create databases.
+Hibernate schema management is disabled (`ddl-auto=none`); Spring SQL
+initialization and migration tools are not used. The Resource table uses an OID
+column to match the entity's PostgreSQL large-object mapping.
+Database storage uses `tmpfs`: **all database data is lost when its container
+stops or restarts**. SQL initialization runs again on the empty storage.
+Existing Module 1 named volumes are no longer mounted and are not deleted.
+Changing a database name in `.env` also requires updating the corresponding
+JDBC URL.
+
+## Run services in Docker
+
+Each standalone service has a two-stage Dockerfile: Eclipse Temurin 21 JDK
+Alpine builds the application, and Temurin 21 JRE Alpine runs only the packaged JAR.
+Maven configuration is copied and dependencies downloaded before source files,
+so source-only changes reuse the dependency layer. Both builds skip test
+compilation and execution. From the repository root, build and start everything:
+
+```sh
+docker compose up -d --build
+```
+
+Compose automatically reads `.env` and injects database and service configuration.
+All containers use the default Compose network and logical service names for
+communication. Database health checks gate application startup. No application
+image registry or manual image build/load is required. Stop local application
+processes before starting Compose to avoid port conflicts.
+
+Use `http://localhost:8081` and `http://localhost:8082` for container API
+requests (or the ports set by `RESOURCE_SERVICE_PORT` and `SONG_SERVICE_PORT`).
+A read-only smoke check is:
+
+```sh
+curl -i http://localhost:8081/resources/ABC
+curl -i http://localhost:8082/songs/ABC
+```
+
+Both should return `400` with the invalid-ID JSON error. Check startup with
+`docker compose logs resource-service song-service`. Stop the stack with
+`docker compose down`. To run the supplied Postman collection, set
+`resource_service_url` to `http://localhost:8081` and `song_service_url` to
+`http://localhost:8082`, and select the sample MP3 for both binary upload requests.
 
 ## API
 
@@ -227,16 +263,6 @@ Validation error response:
 ```
 
 ## Service-local web support
-
-Each service contains its own copies of the error DTOs, exception types,
-`GlobalExceptionHandler`, and ID validation annotations under
-`com.kazimbayram.elearn.common.web`. The local auto-configuration registers
-the handler for servlet applications, so no additional component scanning or
-manual imports are needed. Service-specific exceptions can extend
-`NotFoundException`; service validation can throw
-`new RequestValidationException("field", "Human-readable message")` or pass a
-map of field errors. Annotated request DTO failures use the same validation
-response. Unexpected failures are logged and return a generic `500` message.
 
 Both services use Bean Validation annotations `@PositiveId` and `@IdCsv`
 for positive integer and 200-character CSV validation. Spring MVC validates

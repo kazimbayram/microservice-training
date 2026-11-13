@@ -5,34 +5,23 @@ Boot and Spring Data JPA, with a separate PostgreSQL database for each service.
 Apache Tika extracts audio metadata without changing tag values, except for
 converting duration from seconds to `mm:ss`.
 
-This multi-module Maven project includes Resource Service, Song Service, and a
-shared web starter. Both database containers are defined in the root Compose file.
-Resource uploads store the original audio and invoke Song Service to create
-metadata using the generated Resource ID.
+This repository contains two independent Maven projects: Resource Service and
+Song Service. Each service includes its own web error handling and validation
+code, and each can be built from its own directory. Both database containers
+are defined in the root Compose file. Resource uploads store the original audio
+and invoke Song Service to create metadata using the generated Resource ID.
 
 ## Structure
 
 ```text
 project-root/
 |-- compose.yaml
-|-- pom.xml            Parent POM and module aggregation
-|-- mvnw
-|-- mvnw.cmd
-|-- .mvn/wrapper/
 |-- .gitignore
 |-- README.md
-|-- common-web-starter/
-|   |-- pom.xml
-|   |-- src/main/java/com/kazimbayram/elearn/common/web/
-|   |   |-- autoconfigure/  Spring Boot auto-configuration
-|   |   |-- dto/           Shared error responses
-|   |   |-- exception/     Shared exceptions and global HTTP error handling
-|   |   `-- validation/    Shared ID and CSV validation
-|   |-- src/main/resources/META-INF/spring/
-|   |   `-- org.springframework.boot.autoconfigure.AutoConfiguration.imports
-|   `-- src/test/java/
 |-- resource-service/
 |   |-- pom.xml
+|   |-- mvnw
+|   |-- .mvn/wrapper/
 |   |-- src/main/java/com/kazimbayram/elearn/resource_service/
 |   |   |-- ResourceServiceApplication.java
 |   |   |-- client/
@@ -44,10 +33,17 @@ project-root/
 |   |   |-- mapper/
 |   |   |-- repository/
 |   |   `-- service/
+|   |-- src/main/java/com/kazimbayram/elearn/common/web/
+|   |   |-- autoconfigure/
+|   |   |-- dto/
+|   |   |-- exception/
+|   |   `-- validation/
 |   |-- src/main/resources/application.yaml
 |   `-- src/test/java/
 `-- song-service/
     |-- pom.xml
+    |-- mvnw
+    |-- .mvn/wrapper/
     |-- src/main/java/com/kazimbayram/elearn/song_service/
     |   |-- SongServiceApplication.java
     |   |-- controller/
@@ -57,6 +53,11 @@ project-root/
     |   |-- mapper/
     |   |-- repository/
     |   `-- service/
+    |-- src/main/java/com/kazimbayram/elearn/common/web/
+    |   |-- autoconfigure/
+    |   |-- dto/
+    |   |-- exception/
+    |   `-- validation/
     |-- src/main/resources/application.yaml
     `-- src/test/java/
 ```
@@ -66,29 +67,25 @@ required by its API contract; DELETE returns a response DTO.
 Services handle validation and transactions; mappers convert between metadata
 DTOs and internal entities. Tests mirror the application packages.
 
-The parent artifact is temporarily named `resource-service-parent`. Renaming the
-root directory does not affect Maven. If you rename the parent's Maven
-`artifactId`, also update the `<parent><artifactId>` in each module's `pom.xml`.
-The Maven Wrapper and shared infrastructure files remain only at the root.
+The Maven projects have no root parent or shared Maven module. Each service has
+its own Maven Wrapper and inherits directly from Spring Boot.
 
 ## Run locally
 
-Requires JDK 21 and Docker with Docker Compose. Use the included Maven Wrapper.
-Start the databases with the included training-only credential defaults:
+Requires JDK 21 and Docker with Docker Compose. On a fresh checkout, copy
+`.env.example` to `.env`. The example contains training-only credentials matching
+the applications' local defaults. `.env` is ignored by Git and Docker builds.
+Start only the database containers, then run services locally:
 
 ```sh
-docker compose up -d --wait
-export RESOURCE_DB_URL=jdbc:postgresql://localhost:${DB_PORT:-5433}/resource_db
-export SONG_DB_URL=jdbc:postgresql://localhost:${SONG_DB_PORT:-5434}/song_db
-./mvnw install -DskipTests
-./mvnw -pl resource-service spring-boot:run
+docker compose up -d --wait kb-resource-db kb-song-db
+(cd resource-service && ./mvnw spring-boot:run)
 ```
 
-In a second terminal with the same database environment variables, start Song
-Service:
+In a second terminal, start Song Service:
 
 ```sh
-./mvnw -pl song-service spring-boot:run
+(cd song-service && ./mvnw spring-boot:run)
 ```
 
 The database is `resource_db`, hosted by a dedicated `postgres:16-alpine`
@@ -97,7 +94,7 @@ on host port 5433 and retains port 5432 inside its container. Set `DB_PORT` to
 override the host port. Song Service has its own PostgreSQL container with
 database `song_db`, exposed on host port 5434 (override with `SONG_DB_PORT`).
 Song Service runs at `http://localhost:8082`.
-Each database has separate credentials and a separate volume. Resource Service
+Each database has separate credentials and ephemeral storage. Resource Service
 defaults to username `resource_db_username` and password `resource_db_password`;
 Song Service defaults to username `song_db_username` and password
 `song_db_password`. Override these training-only defaults with
@@ -229,54 +226,50 @@ Validation error response:
 }
 ```
 
-## Shared web starter
+## Service-local web support
 
-Other Spring Boot MVC services can use the same validation and error contract by
-adding this dependency (no component scanning changes or manual imports needed):
+Each service contains its own copies of the error DTOs, exception types,
+`GlobalExceptionHandler`, and ID validation annotations under
+`com.kazimbayram.elearn.common.web`. The local auto-configuration registers
+the handler for servlet applications, so no additional component scanning or
+manual imports are needed. Service-specific exceptions can extend
+`NotFoundException`; service validation can throw
+`new RequestValidationException("field", "Human-readable message")` or pass a
+map of field errors. Annotated request DTO failures use the same validation
+response. Unexpected failures are logged and return a generic `500` message.
 
-```xml
-<dependency>
-    <groupId>com.kazimbayram.elearn</groupId>
-    <artifactId>common-web-starter</artifactId>
-    <version>${project.version}</version>
-</dependency>
-```
-
-The starter is a regular library JAR, not an executable application. It supplies
-Spring Web, Bean Validation (`@Valid`, `@NotBlank`, etc.), shared error DTOs,
-`RequestValidationException`, `NotFoundException`, `ConflictException`, and an auto-configured
-`GlobalExceptionHandler` for servlet applications. Service-specific exceptions
-can extend `NotFoundException`; service validation can throw
-`new RequestValidationException("field", "Human-readable message")` or pass a map
-of field errors. Annotated request DTO failures use the same validation response.
-Unexpected failures are logged and return a generic `500` message.
-
-Both services use shared Bean Validation annotations `@PositiveId` and `@IdCsv`
+Both services use Bean Validation annotations `@PositiveId` and `@IdCsv`
 for positive integer and 200-character CSV validation. Spring MVC validates
 controller parameters and `@Validated` protects service entry points.
 Path ID and CSV errors use the simple error response; request DTO constraint
 errors include field details. CSV errors identify the invalid token or report
 the actual string length. Missing metadata fields have required-field messages;
 empty text fields have length/format messages. Business logic, persistence,
-mappers, and successful response DTOs remain in each service.
-The starter has no database dependency.
-Build/install the reactor before running an individual consuming module.
+mappers, and successful response DTOs remain in each service. The web support
+code is intentionally duplicated so either project can be built without the
+other.
 
 ## Tests
 
 Run unit and HTTP contract tests without a database:
 
 ```sh
-./mvnw -Dtest=CommonWebStarterTests,ResourceControllerTests,ResourceUploadTests,ResourceServiceTests,AudioMetadataExtractorTests,SongMetadataMapperTests,SongControllerTests,SongServiceTests test
+(cd song-service && ./mvnw -Dtest=SongControllerTests,SongServiceTests test)
 ```
 
+Resource Service's existing upload and metadata tests reference a
+`resource_service.support.Mp3Fixture` helper that is not present in the
+repository, so Maven cannot compile its test sources until that helper is added.
+
 Run all tests, including the existing Song Service HTTP/persistence integration
-tests, with both databases running and the URL environment overrides above.
+tests, with both databases running.
 Song integration tests roll back their database changes:
 
 ```sh
-./mvnw test
+(cd song-service && ./mvnw test)
 ```
 
-Build all modules from the root with `./mvnw clean package`. The executable
-service JARs are generated in `resource-service/target/` and `song-service/target/`.
+Build either service independently from its directory with
+`./mvnw clean package -Dmaven.test.skip=true` to skip the existing test-source
+compilation issue noted above. The executable JAR is generated in that
+service's `target/` directory.

@@ -5,8 +5,8 @@ Boot and Spring Data JPA, with a separate PostgreSQL database for each service.
 Apache Tika extracts audio metadata without changing tag values, except for
 converting duration from seconds to `mm:ss`.
 
-This repository contains two independent Maven projects: Resource Service and
-Song Service. Each service includes its own web error handling and validation
+This repository contains three independent Maven projects: Resource Service,
+Song Service, and Eureka Server. Each business service includes its own web error handling and validation
 code, and each can be built from its own directory. Both database containers
 are defined in the root Compose file. Resource uploads store the original audio
 and invoke Song Service to create metadata using the generated Resource ID.
@@ -18,6 +18,12 @@ project-root/
 |-- compose.yaml
 |-- .gitignore
 |-- README.md
+|-- eureka-server/
+|   |-- pom.xml
+|   |-- mvnw
+|   |-- .mvn/wrapper/
+|   |-- Dockerfile
+|   `-- src/main/
 |-- resource-service/
 |   |-- pom.xml
 |   |-- mvnw
@@ -75,18 +81,27 @@ its own Maven Wrapper and inherits directly from Spring Boot.
 Requires JDK 21 and Docker with Docker Compose. On a fresh checkout, copy
 `.env.example` to `.env`. The example contains training-only credentials matching
 the applications' local defaults. `.env` is ignored by Git and Docker builds.
-Start only the database containers, then run services locally:
+Start only the database containers, then start Eureka locally:
 
 ```sh
 docker compose up -d --wait kb-resource-db kb-song-db
-(cd resource-service && ./mvnw spring-boot:run)
+(cd eureka-server && ./mvnw spring-boot:run)
 ```
 
-In a second terminal, start Song Service:
+In separate terminals, start Song Service and Resource Service:
 
 ```sh
 (cd song-service && ./mvnw spring-boot:run)
+(cd resource-service && ./mvnw spring-boot:run)
 ```
+
+Alternatively, run each application's main class from IntelliJ, starting
+`EurekaServerApplication` first. No profiles or configuration edits are needed.
+Eureka is available at `http://localhost:8761`. Both services register using their
+`spring.application.name`; Resource Service resolves `song-service` through
+Eureka and uses Spring Cloud LoadBalancer for outbound Song API calls.
+Eureka itself is the registry, not a request proxy or load balancer.
+Wait until both applications appear as `UP` before running API requests.
 
 The database is `resource_db`, hosted by a dedicated `postgres:16-alpine`
 container. The HTTP service runs at `http://localhost:8081`. PostgreSQL is exposed
@@ -121,33 +136,98 @@ JDBC URL.
 Each standalone service has a two-stage Dockerfile: Eclipse Temurin 21 JDK
 Alpine builds the application, and Temurin 21 JRE Alpine runs only the packaged JAR.
 Maven configuration is copied and dependencies downloaded before source files,
-so source-only changes reuse the dependency layer. Both builds skip test
+so source-only changes reuse the dependency layer. All builds skip test
 compilation and execution. From the repository root, build and start everything:
 
 ```sh
-docker compose up -d --build
+docker compose up -d --build --scale song-service=2
 ```
 
 Compose automatically reads `.env` and injects database and service configuration.
 All containers use the default Compose network and logical service names for
-communication. Database health checks gate application startup. No application
+communication. Database, Eureka, and Song Service health checks gate dependent startup. No application
 image registry or manual image build/load is required. Stop local application
 processes before starting Compose to avoid port conflicts.
 
-Use `http://localhost:8081` and `http://localhost:8082` for container API
-requests (or the ports set by `RESOURCE_SERVICE_PORT` and `SONG_SERVICE_PORT`).
+With `--scale song-service=2`, Compose starts one Eureka Server, one Resource
+Service, Traefik, and two Song Service instances sharing the same Song database.
+Eureka is published at `http://localhost:8761`. Traefik publishes the single
+API address `http://localhost:8080` with service-specific base paths:
+`/resources` routes to Resource Service, while `/songs` is load-balanced across
+healthy Song replicas discovered through its Docker provider. Each router strips
+its service prefix once, preserving the application endpoint path and query
+parameters: `/resources/resources/1` becomes `/resources/1`, and `/songs/songs/1`
+becomes `/songs/1`. Neither application publishes host
+ports; both are reachable through Traefik or within the default Compose network.
+Both instances listen on 8082 internally and register distinct container
+hostnames/instance IDs and reachable container IP addresses.
+Override host ports with `EUREKA_SERVER_PORT` and `API_PORT` in `.env`.
+Without `--scale`, Compose starts one Song
+Service instance. Additional replicas do not require additional host ports.
+Do not set a fixed `container_name`, which would prevent scaling.
+
+Traefik mounts `/var/run/docker.sock` read-only to discover containers. Docker
+API access is privileged even with a read-only socket mount; this setup is for
+the local demo on a trusted host. The Traefik dashboard is not enabled, and
+containers are not routed unless explicitly labeled.
+Traefik disables SELinux container labeling to access the socket on the
+SELinux-enabled Docker-compatible engine used for this project; other
+containers retain their default isolation.
+
+Use `http://localhost:8080/resources` as the Resource API base URL and
+`http://localhost:8080/songs` as the Song API base URL. Append the application
+endpoint (`/resources` or `/songs`) to these base URLs. The earlier unprefixed
+gateway URLs no longer map to the application endpoints.
 A read-only smoke check is:
 
 ```sh
-curl -i http://localhost:8081/resources/ABC
-curl -i http://localhost:8082/songs/ABC
+curl -i http://localhost:8080/resources/resources/ABC
+curl -i http://localhost:8080/songs/songs/ABC
 ```
 
 Both should return `400` with the invalid-ID JSON error. Check startup with
 `docker compose logs resource-service song-service`. Stop the stack with
 `docker compose down`. To run the supplied Postman collection, set
-`resource_service_url` to `http://localhost:8081` and `song_service_url` to
-`http://localhost:8082`, and select the sample MP3 for both binary upload requests.
+`resource_service_url` to `http://localhost:8080/resources` and
+`song_service_url` to `http://localhost:8080/songs`,
+and select the sample MP3 for both binary upload requests.
+
+## Eureka discovery and demo
+
+Spring Cloud 2025.1.2 is imported through its release BOM from Maven Central and
+supports the project's Spring Boot 4.1.x version. Both clients use
+`EUREKA_SERVER_URL` from Compose and default to `http://localhost:8761/eureka/`
+when launched locally. There is no direct Song host/port fallback:
+`SONG_SERVICE_URL` is no longer used. Resource Service's load-balanced
+`RestClient.Builder` resolves the logical `http://song-service` URL for both
+metadata creation and deletion, preserving the existing error contract.
+
+The five-second heartbeat, registry fetch, and server response-cache intervals
+and short client lease expiry are for this development/demo environment only.
+Discovery is eventually consistent: a healthy container may not yet be visible
+in every client's registry cache. Allow propagation before testing. A stopped
+instance may remain cached briefly; requests during that interval can fail.
+Writes are not automatically retried because creating metadata is not
+idempotent. Tune these intervals and leases for production rather than copying
+the demo values unchanged.
+
+For the Docker demonstration, stop local Java processes to free ports, run
+`docker compose down`, then `docker compose up -d --build --scale song-service=2 --wait`. Inspect
+`docker compose ps` and `docker compose logs eureka-server resource-service song-service`.
+Open `http://localhost:8761` and verify one `RESOURCE-SERVICE` and two
+`SONG-SERVICE` instances are `UP`. Run the Postman collection with the URLs above.
+Traefik routes external Resource requests and balances external Song requests
+using Docker discovery. Resource Service
+continues to perform client-side balancing through Eureka, bypassing Traefik;
+both Song replicas register separately with their internal addresses. Stop the
+Docker stack with `docker compose down` afterward.
+
+For the local demonstration, start only `kb-resource-db` and `kb-song-db` in
+Docker, then launch the three applications as described above. Verify the
+registry and repeat the Postman tests against ports 8081 and 8082. A second local
+Song process can be started with `--server.port=8083` to demonstrate balancing
+locally as well. Keep local and Docker application runs separate so their
+registrations and published ports do not conflict.
 
 ## API
 
@@ -189,8 +269,8 @@ Non-`audio/mpeg` requests return `400` with a simple error such as
 Empty bodies and content without MPEG audio frames return `400`.
 
 The upload service parses MP3 metadata with Apache Tika, stores the original
-bytes, and calls `POST /songs` at `http://localhost:8082` (override using
-`SONG_SERVICE_URL`). Title, artist, album, and release year are mapped to the Song
+bytes, and calls `POST /songs` through the load-balanced `http://song-service`
+discovery name. Title, artist, album, and release year are mapped to the Song
 Service fields without trimming, truncation, defaults, or date normalization.
 Only duration is converted from seconds to `mm:ss` (fractional seconds discarded).
 The Song Service API accepts scalar fields, so the first extracted value is
@@ -277,25 +357,20 @@ other.
 
 ## Tests
 
-Run unit and HTTP contract tests without a database:
+Run all tests from the repository root:
 
 ```sh
-(cd song-service && ./mvnw -Dtest=SongControllerTests,SongServiceTests test)
-```
-
-Resource Service's existing upload and metadata tests reference a
-`resource_service.support.Mp3Fixture` helper that is not present in the
-repository, so Maven cannot compile its test sources until that helper is added.
-
-Run all tests, including the existing Song Service HTTP/persistence integration
-tests, with both databases running.
-Song integration tests roll back their database changes:
-
-```sh
+(cd resource-service && ./mvnw test)
 (cd song-service && ./mvnw test)
 ```
 
-Build either service independently from its directory with
-`./mvnw clean package -Dmaven.test.skip=true` to skip the existing test-source
-compilation issue noted above. The executable JAR is generated in that
+Integration tests activate the `test` profile and use an embedded, in-memory H2
+database with a schema created and dropped by Hibernate. No PostgreSQL, Docker,
+or Eureka server is required. Persistence tests roll back their changes.
+H2 is a test-only dependency; normal application runs still use PostgreSQL.
+These tests do not replace PostgreSQL-specific integration checks.
+
+Build any service independently from its directory with
+`./mvnw clean package -Dmaven.test.skip=true` to skip test compilation and
+execution. The executable JAR is generated in that
 service's `target/` directory.

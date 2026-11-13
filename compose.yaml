@@ -10,7 +10,7 @@ services:
     volumes:
       - ./init-scripts/resource-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -26,10 +26,25 @@ services:
     volumes:
       - ./init-scripts/song-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  eureka-server:
+    build:
+      context: ./eureka-server
+    environment:
+      EUREKA_SERVER_URL: ${EUREKA_SERVER_URL:?Set EUREKA_SERVER_URL in .env}
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:?Set EUREKA_HOSTNAME in .env}
+    ports:
+      - "${EUREKA_SERVER_PORT:-8761}:8761"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8761/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   resource-service:
     build:
@@ -38,14 +53,57 @@ services:
       RESOURCE_DB_URL: ${RESOURCE_DB_URL:?Set RESOURCE_DB_URL in .env}
       RESOURCE_DB_USERNAME: ${RESOURCE_DB_USERNAME:?Set RESOURCE_DB_USERNAME in .env}
       RESOURCE_DB_PASSWORD: ${RESOURCE_DB_PASSWORD:?Set RESOURCE_DB_PASSWORD in .env}
-      SONG_SERVICE_URL: ${SONG_SERVICE_URL:?Set SONG_SERVICE_URL in .env}
-    ports:
-      - "${RESOURCE_SERVICE_PORT:-8081}:8081"
+      EUREKA_SERVER_URL: ${EUREKA_SERVER_URL:?Set EUREKA_SERVER_URL in .env}
+    expose:
+      - "8081"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.resources.rule=Path(`/resources`) || PathPrefix(`/resources/`)"
+      - "traefik.http.routers.resources.entrypoints=api"
+      - "traefik.http.routers.resources.service=resources"
+      - "traefik.http.routers.resources.middlewares=resources-strip-prefix"
+      - "traefik.http.middlewares.resources-strip-prefix.stripprefix.prefixes=/resources"
+      - "traefik.http.services.resources.loadbalancer.server.port=8081"
+      - "traefik.http.services.resources.loadbalancer.healthcheck.path=/actuator/health"
+      - "traefik.http.services.resources.loadbalancer.healthcheck.interval=5s"
     depends_on:
       kb-resource-db:
         condition: service_healthy
       song-service:
-        condition: service_started
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  traefik:
+    image: traefik:v3.6
+    security_opt:
+      - label=disable
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.api.address=:8080"
+      - "--ping=true"
+      - "--ping.entrypoint=api"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      resource-service:
+        condition: service_healthy
+      song-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   song-service:
     build:
@@ -54,8 +112,27 @@ services:
       SONG_DB_URL: ${SONG_DB_URL:?Set SONG_DB_URL in .env}
       SONG_DB_USERNAME: ${SONG_DB_USERNAME:?Set SONG_DB_USERNAME in .env}
       SONG_DB_PASSWORD: ${SONG_DB_PASSWORD:?Set SONG_DB_PASSWORD in .env}
-    ports:
-      - "${SONG_SERVICE_PORT:-8082}:8082"
+      EUREKA_SERVER_URL: ${EUREKA_SERVER_URL:?Set EUREKA_SERVER_URL in .env}
+    expose:
+      - "8082"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.songs.rule=Path(`/songs`) || PathPrefix(`/songs/`)"
+      - "traefik.http.routers.songs.entrypoints=api"
+      - "traefik.http.routers.songs.service=songs"
+      - "traefik.http.routers.songs.middlewares=songs-strip-prefix"
+      - "traefik.http.middlewares.songs-strip-prefix.stripprefix.prefixes=/songs"
+      - "traefik.http.services.songs.loadbalancer.server.port=8082"
+      - "traefik.http.services.songs.loadbalancer.healthcheck.path=/actuator/health"
+      - "traefik.http.services.songs.loadbalancer.healthcheck.interval=5s"
     depends_on:
       kb-song-db:
         condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

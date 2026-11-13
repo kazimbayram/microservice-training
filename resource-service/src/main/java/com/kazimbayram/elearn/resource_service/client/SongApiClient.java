@@ -6,7 +6,7 @@ import java.util.stream.Collectors;
 import com.kazimbayram.elearn.resource_service.dto.SongMetadataRequest;
 import com.kazimbayram.elearn.resource_service.exception.SongApiException;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.loadbalancer.LoadBalanced;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -21,8 +21,8 @@ public class SongApiClient {
 
 	private final RestClient restClient;
 
-	public SongApiClient(@Value("${song-service.base-url}") String baseUrl, ObjectMapper objectMapper) {
-		restClient = RestClient.builder().baseUrl(baseUrl)
+	public SongApiClient(@LoadBalanced RestClient.Builder builder, ObjectMapper objectMapper) {
+		restClient = builder.baseUrl("http://song-service")
 			.defaultStatusHandler(HttpStatusCode::isError, (request, response) -> {
 				SongApiError error;
 				try {
